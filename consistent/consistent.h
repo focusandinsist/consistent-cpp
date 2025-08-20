@@ -56,7 +56,7 @@ private:
     std::vector<Member*> cached_members_;
     bool members_dirty_ = true;
 
-    void InitMember(const Member& member);
+    void InitMember(std::unique_ptr<Member> member);
     void DistributePartitions();
     void DistributeWithLoad(int part_id, int idx, 
                            std::unordered_map<int, Member*>& partitions,
@@ -70,12 +70,12 @@ private:
     
     // Member management helpers
     std::pair<std::unordered_map<int, Member*>, std::unordered_map<std::string, double>>
-    CalculatePartitionsWithNewMember(const Member& new_member);
+    CalculatePartitionsWithNewMember(const std::string& member_name);
     
     std::pair<std::unordered_map<int, Member*>, std::unordered_map<std::string, double>>
     CalculatePartitionsWithoutMember(const std::string& member_name);
     
-    void AddToRing(const Member& member);
+    void AddToRing(Member* member);
     void RemoveFromRing(const std::string& name);
     void DelSlice(uint64_t val);
     

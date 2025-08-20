@@ -26,7 +26,7 @@ Consistent::Consistent(const std::vector<std::unique_ptr<Member>>& members, Conf
     
     // Initialize members
     for (const auto& member : members) {
-        InitMember(*member);
+        InitMember(member->Clone());
     }
     
     if (!members.empty()) {
@@ -56,7 +56,7 @@ void Consistent::ValidateConfig(int member_count, const Config& config) {
 
 void Consistent::Add(std::unique_ptr<Member> member) {
     std::string member_name = member->String();
-    
+
     // First check if the member already exists (read lock)
     {
         std::shared_lock<std::shared_mutex> lock(mutex_);
@@ -64,53 +64,66 @@ void Consistent::Add(std::unique_ptr<Member> member) {
             return; // Member already exists
         }
     }
-    
-    // Calculate new partition distribution
-    auto [new_partitions, new_loads] = CalculatePartitionsWithNewMember(*member);
-    
+
     // Acquire write lock to update data structures
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    
+
     // Double-check if member exists
     if (members_.find(member_name) != members_.end()) {
         return;
     }
-    
-    AddToRing(*member);
+
+    // CRITICAL: Take ownership first, then get stable pointer
+    members_[member_name] = std::move(member);
+    Member* stable_ptr = members_[member_name].get();
+
+    // Add to ring
+    AddToRing(stable_ptr);
+
+    // Calculate new partition distribution (now that member is in members_)
+    auto [new_partitions, new_loads] = CalculatePartitionsWithNewMember(member_name);
+
     partitions_ = std::move(new_partitions);
     loads_ = std::move(new_loads);
-    members_[member_name] = std::move(member);
     members_dirty_ = true;
 }
 
 std::pair<std::unordered_map<int, Member*>, std::unordered_map<std::string, double>>
-Consistent::CalculatePartitionsWithNewMember(const Member& new_member) {
+Consistent::CalculatePartitionsWithNewMember(const std::string& member_name) {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    
+
+    auto it = members_.find(member_name);
+    if (it == members_.end()) {
+        // Member not found, return current state
+        return {partitions_, loads_};
+    }
+
+    Member* new_member = it->second.get();
+
     // Create temporary ring and sorted set
     std::unordered_map<uint64_t, Member*> temp_ring = ring_;
     std::vector<uint64_t> temp_sorted_set = sorted_set_;
-    
+
     // Add new member to temporary ring
     for (int i = 0; i < config_.replication_factor; ++i) {
-        auto key = BuildVirtualNodeKey(new_member.String(), i);
+        auto key = BuildVirtualNodeKey(member_name, i);
         uint64_t h = config_.hasher->Sum64(key);
-        temp_ring[h] = const_cast<Member*>(&new_member);
+        temp_ring[h] = new_member;
         temp_sorted_set.push_back(h);
     }
-    
+
     // Sort the temporary set
     std::sort(temp_sorted_set.begin(), temp_sorted_set.end());
-    
-    int new_member_count = members_.size() + 1;
+
+    int new_member_count = members_.size();
     return CalculatePartitionsWithRingAndMemberCount(temp_ring, temp_sorted_set, new_member_count);
 }
 
-void Consistent::AddToRing(const Member& member) {
+void Consistent::AddToRing(Member* member) {
     for (int i = 0; i < config_.replication_factor; ++i) {
-        auto key = BuildVirtualNodeKey(member.String(), i);
+        auto key = BuildVirtualNodeKey(member->String(), i);
         uint64_t h = config_.hasher->Sum64(key);
-        ring_[h] = const_cast<Member*>(&member);
+        ring_[h] = member;  // Now using stable pointer from members_
         sorted_set_.push_back(h);
     }
     std::sort(sorted_set_.begin(), sorted_set_.end());
@@ -197,8 +210,9 @@ void Consistent::RemoveFromRing(const std::string& name) {
 }
 
 void Consistent::DelSlice(uint64_t val) {
-    auto it = std::find(sorted_set_.begin(), sorted_set_.end(), val);
-    if (it != sorted_set_.end()) {
+    auto it = std::lower_bound(sorted_set_.begin(), sorted_set_.end(), val);
+
+    if (it != sorted_set_.end() && *it == val) {
         sorted_set_.erase(it);
     }
 }
@@ -503,18 +517,22 @@ Consistent::CalculatePartitionsWithRingAndMemberCount(
     return {partitions, loads};
 }
 
-void Consistent::InitMember(const Member& member) {
+void Consistent::InitMember(std::unique_ptr<Member> member) {
+    std::string member_name = member->String();
+
+    // Take ownership first, then get stable pointer
+    members_[member_name] = std::move(member);
+    Member* stable_ptr = members_[member_name].get();
+
     for (int i = 0; i < config_.replication_factor; ++i) {
-        auto key = BuildVirtualNodeKey(member.String(), i);
+        auto key = BuildVirtualNodeKey(member_name, i);
         uint64_t h = config_.hasher->Sum64(key);
-        ring_[h] = const_cast<Member*>(&member);
+        ring_[h] = stable_ptr;  // Use stable pointer from members_
         sorted_set_.push_back(h);
     }
 
     // Sort the hash values in ascending order
     std::sort(sorted_set_.begin(), sorted_set_.end());
-
-    members_[member.String()] = member.Clone();
     members_dirty_ = true;
 }
 
