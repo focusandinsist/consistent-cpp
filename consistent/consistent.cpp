@@ -128,30 +128,35 @@ void Consistent::RemoveByName(const std::string& name) {
             return; // Member doesn't exist
         }
     }
-    
+
     // Calculate new partition distribution
     auto [new_partitions, new_loads] = CalculatePartitionsWithoutMember(name);
-    
+
     // Acquire write lock to update data structures
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    
+
     // Double-check if member exists
     if (members_.find(name) == members_.end()) {
         return;
     }
-    
+
+    // CRITICAL: Remove all references to the member BEFORE deleting it
+    // This prevents dangling pointers in ring_ and partitions_
     RemoveFromRing(name);
-    members_.erase(name);
-    members_dirty_ = true;
-    
-    if (members_.empty()) {
+
+    // Update partitions and loads BEFORE erasing the member
+    if (members_.size() == 1) {
+        // Last member being removed
         partitions_.clear();
         loads_.clear();
-        return;
+    } else {
+        partitions_ = std::move(new_partitions);
+        loads_ = std::move(new_loads);
     }
-    
-    partitions_ = std::move(new_partitions);
-    loads_ = std::move(new_loads);
+
+    // Finally, erase the member (this destroys the unique_ptr and frees memory)
+    members_.erase(name);
+    members_dirty_ = true;
 }
 
 std::pair<std::unordered_map<int, Member*>, std::unordered_map<std::string, double>>
@@ -317,7 +322,13 @@ std::vector<std::unique_ptr<Member>> Consistent::GetMembers() const {
     {
         std::shared_lock<std::shared_mutex> lock(mutex_);
         if (!members_dirty_ && !cached_members_.empty()) {
-            return CloneMembers(cached_members_);
+            // Clone from cached raw pointers
+            std::vector<std::unique_ptr<Member>> result;
+            result.reserve(cached_members_.size());
+            for (Member* member : cached_members_) {
+                result.push_back(member->Clone());
+            }
+            return result;
         }
     }
 
@@ -326,35 +337,34 @@ std::vector<std::unique_ptr<Member>> Consistent::GetMembers() const {
 
     // Check again if cache was updated
     if (!members_dirty_ && !cached_members_.empty()) {
-        return CloneMembers(cached_members_);
+        // Clone from cached raw pointers
+        std::vector<std::unique_ptr<Member>> result;
+        result.reserve(cached_members_.size());
+        for (Member* member : cached_members_) {
+            result.push_back(member->Clone());
+        }
+        return result;
     }
 
-    // Create thread-safe copy of member list using Clone()
-    std::vector<std::unique_ptr<Member>> members;
-    members.reserve(members_.size());
-    for (const auto& [name, member] : members_) {
-        members.push_back(member->Clone());
-    }
-
-    // Update cache with original members (not cloned)
+    // Update cache with raw pointers (no cloning for cache)
     cached_members_.clear();
     cached_members_.reserve(members_.size());
     for (const auto& [name, member] : members_) {
-        cached_members_.push_back(member->Clone());
+        cached_members_.push_back(member.get());
     }
     members_dirty_ = false;
 
-    return members;
-}
-
-std::vector<std::unique_ptr<Member>> Consistent::CloneMembers(const std::vector<std::unique_ptr<Member>>& members) const {
+    // Clone for return value
     std::vector<std::unique_ptr<Member>> result;
-    result.reserve(members.size());
-    for (const auto& member : members) {
+    result.reserve(cached_members_.size());
+    for (Member* member : cached_members_) {
         result.push_back(member->Clone());
     }
+
     return result;
 }
+
+
 
 std::unordered_map<std::string, double> Consistent::LoadDistribution() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);

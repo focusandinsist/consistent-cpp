@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 #include <memory>
+#include <mutex>
 
 namespace consistent {
 
@@ -18,8 +19,8 @@ class CRC64Hasher : public Hasher {
 private:
     static const uint64_t CRC64_ISO_POLY = 0xD800000000000000ULL;
     static std::vector<uint64_t> crc64_table_;
-    static bool table_initialized_;
-    
+    static std::once_flag table_init_flag_;
+
     static void InitializeTable();
     static uint64_t CalculateCRC64(const uint8_t* data, size_t length);
 

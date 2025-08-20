@@ -53,13 +53,10 @@ private:
     std::unordered_map<int, Member*> partitions_;
     std::unordered_map<uint64_t, Member*> ring_;
     
-    std::vector<std::unique_ptr<Member>> cached_members_;
+    std::vector<Member*> cached_members_;
     bool members_dirty_ = true;
 
-    // Internal methods - Initialization
     void InitMember(const Member& member);
-    
-    // Internal methods - Partition Distribution
     void DistributePartitions();
     void DistributeWithLoad(int part_id, int idx, 
                            std::unordered_map<int, Member*>& partitions,
@@ -88,9 +85,7 @@ private:
     Member* GetPartitionOwner(int part_id) const;
     std::vector<Member*> GetClosestN(int part_id, int count) const;
     
-    // Utility methods
     double AverageLoad() const;
-    std::vector<std::unique_ptr<Member>> CloneMembers(const std::vector<std::unique_ptr<Member>>& members) const;
     std::vector<uint8_t> BuildVirtualNodeKey(const std::string& member_str, int index) const;
     
     // Validation
@@ -102,7 +97,9 @@ public:
     void Add(std::unique_ptr<Member> member);
     void Remove(const Member& member);
     void RemoveByName(const std::string& name);
-    
+
+    // Note: Returned pointers are non-owning and managed by this Consistent object.
+    // Do NOT delete these pointers. Do NOT use them after this object is modified or destroyed.
     Member* LocateKey(const std::vector<uint8_t>& key) const;
     Member* LocateKey(const std::string& key) const;
     std::vector<Member*> GetClosestN(const std::vector<uint8_t>& key, int count) const;

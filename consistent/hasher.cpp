@@ -5,11 +5,10 @@ namespace consistent {
 
 // CRC64Hasher static members
 std::vector<uint64_t> CRC64Hasher::crc64_table_(256);
-bool CRC64Hasher::table_initialized_ = false;
+std::once_flag CRC64Hasher::table_init_flag_;
 
 void CRC64Hasher::InitializeTable() {
-    static std::once_flag flag;
-    std::call_once(flag, []() {
+    std::call_once(table_init_flag_, []() {
         for (uint32_t i = 0; i < 256; ++i) {
             uint64_t crc = i;
             for (int j = 0; j < 8; ++j) {
@@ -21,7 +20,6 @@ void CRC64Hasher::InitializeTable() {
             }
             crc64_table_[i] = crc;
         }
-        table_initialized_ = true;
     });
 }
 
