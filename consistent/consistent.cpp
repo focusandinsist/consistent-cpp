@@ -9,18 +9,6 @@ namespace consistent {
 Consistent::Consistent(const std::vector<std::shared_ptr<Member>>& members, Config config)
     : config_(std::move(config)), partition_count_(config_.partition_count) {
 
-    // Set defaults
-    if (config_.partition_count == 0) {
-        config_.partition_count = DEFAULT_PARTITION_COUNT;
-        partition_count_ = DEFAULT_PARTITION_COUNT;
-    }
-    if (config_.replication_factor == 0) {
-        config_.replication_factor = DEFAULT_REPLICATION_FACTOR;
-    }
-    if (config_.load == 0.0) {
-        config_.load = DEFAULT_LOAD;
-    }
-
     // Validate configuration
     ValidateConfig(members.size(), config_);
 
@@ -229,13 +217,7 @@ std::shared_ptr<Member> Consistent::LocateKey(const std::vector<uint8_t>& key) c
         return nullptr;
     }
 
-    for (const auto& [name, shared_member] : members_) {
-        if (shared_member.get() == raw_ptr) {
-            return shared_member;
-        }
-    }
-
-    return nullptr;
+    return raw_ptr->shared_from_this();
 }
 
 std::shared_ptr<Member> Consistent::LocateKey(const std::string& key) const {
@@ -251,13 +233,7 @@ std::shared_ptr<Member> Consistent::LocateKey(const std::string& key) const {
         return nullptr;
     }
 
-    for (const auto& [name, shared_member] : members_) {
-        if (shared_member.get() == raw_ptr) {
-            return shared_member;
-        }
-    }
-
-    return nullptr;
+    return raw_ptr->shared_from_this();
 }
 
 int Consistent::GetPartitionID(const std::vector<uint8_t>& key) const {
@@ -336,12 +312,7 @@ std::vector<std::shared_ptr<Member>> Consistent::GetClosestN(int part_id, int co
         std::string member_key = raw_member->String();
 
         if (seen.find(member_key) == seen.end()) {
-            for (const auto& [name, shared_member] : members_) {
-                if (shared_member.get() == raw_member) {
-                    result.push_back(shared_member);
-                    break;
-                }
-            }
+            result.push_back(raw_member->shared_from_this());
             seen.insert(member_key);
         }
 
@@ -368,12 +339,7 @@ std::vector<std::shared_ptr<Member>> Consistent::GetMembers() const {
             std::vector<std::shared_ptr<Member>> result;
             result.reserve(cached_members_.size());
             for (Member* raw_member : cached_members_) {
-                for (const auto& [name, shared_member] : members_) {
-                    if (shared_member.get() == raw_member) {
-                        result.push_back(shared_member);
-                        break;
-                    }
-                }
+                result.push_back(raw_member->shared_from_this());
             }
             return result;
         }
@@ -388,12 +354,7 @@ std::vector<std::shared_ptr<Member>> Consistent::GetMembers() const {
         std::vector<std::shared_ptr<Member>> result;
         result.reserve(cached_members_.size());
         for (Member* raw_member : cached_members_) {
-            for (const auto& [name, shared_member] : members_) {
-                if (shared_member.get() == raw_member) {
-                    result.push_back(shared_member);
-                    break;
-                }
-            }
+            result.push_back(raw_member->shared_from_this());
         }
         return result;
     }

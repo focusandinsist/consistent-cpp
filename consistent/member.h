@@ -5,7 +5,7 @@
 
 namespace consistent {
 
-class Member {
+class Member : public std::enable_shared_from_this<Member> {
 public:
     virtual ~Member() = default;
     virtual std::string String() const = 0;
