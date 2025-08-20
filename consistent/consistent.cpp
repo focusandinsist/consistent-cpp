@@ -6,9 +6,9 @@
 
 namespace consistent {
 
-Consistent::Consistent(const std::vector<std::unique_ptr<Member>>& members, Config config)
+Consistent::Consistent(const std::vector<std::shared_ptr<Member>>& members, Config config)
     : config_(std::move(config)), partition_count_(config_.partition_count) {
-    
+
     // Set defaults
     if (config_.partition_count == 0) {
         config_.partition_count = DEFAULT_PARTITION_COUNT;
@@ -20,15 +20,15 @@ Consistent::Consistent(const std::vector<std::unique_ptr<Member>>& members, Conf
     if (config_.load == 0.0) {
         config_.load = DEFAULT_LOAD;
     }
-    
+
     // Validate configuration
     ValidateConfig(members.size(), config_);
-    
+
     // Initialize members
     for (const auto& member : members) {
-        InitMember(member->Clone());
+        InitMember(member);
     }
-    
+
     if (!members.empty()) {
         DistributePartitions();
     }
@@ -54,7 +54,7 @@ void Consistent::ValidateConfig(int member_count, const Config& config) {
     }
 }
 
-void Consistent::Add(std::unique_ptr<Member> member) {
+void Consistent::Add(std::shared_ptr<Member> member) {
     std::string member_name = member->String();
 
     // First check if the member already exists (read lock)
@@ -73,12 +73,10 @@ void Consistent::Add(std::unique_ptr<Member> member) {
         return;
     }
 
-    // CRITICAL: Take ownership first, then get stable pointer
-    members_[member_name] = std::move(member);
-    Member* stable_ptr = members_[member_name].get();
+    members_[member_name] = member;
 
     // Add to ring
-    AddToRing(stable_ptr);
+    AddToRing(member);
 
     // Calculate new partition distribution (now that member is in members_)
     auto [new_partitions, new_loads] = CalculatePartitionsWithNewMember(member_name);
@@ -119,11 +117,12 @@ Consistent::CalculatePartitionsWithNewMember(const std::string& member_name) {
     return CalculatePartitionsWithRingAndMemberCount(temp_ring, temp_sorted_set, new_member_count);
 }
 
-void Consistent::AddToRing(Member* member) {
+void Consistent::AddToRing(std::shared_ptr<Member> member) {
+    Member* raw_ptr = member.get();
     for (int i = 0; i < config_.replication_factor; ++i) {
         auto key = BuildVirtualNodeKey(member->String(), i);
         uint64_t h = config_.hasher->Sum64(key);
-        ring_[h] = member;  // Now using stable pointer from members_
+        ring_[h] = raw_ptr;  // Store raw pointer for performance
         sorted_set_.push_back(h);
     }
     std::sort(sorted_set_.begin(), sorted_set_.end());
@@ -217,24 +216,48 @@ void Consistent::DelSlice(uint64_t val) {
     }
 }
 
-Member* Consistent::LocateKey(const std::vector<uint8_t>& key) const {
+std::shared_ptr<Member> Consistent::LocateKey(const std::vector<uint8_t>& key) const {
     if (ring_.empty()) {
         return nullptr;
     }
 
     std::shared_lock<std::shared_mutex> lock(mutex_);
     int part_id = GetPartitionID(key);
-    return GetPartitionOwner(part_id);
+    Member* raw_ptr = GetPartitionOwner(part_id);
+
+    if (!raw_ptr) {
+        return nullptr;
+    }
+
+    for (const auto& [name, shared_member] : members_) {
+        if (shared_member.get() == raw_ptr) {
+            return shared_member;
+        }
+    }
+
+    return nullptr;
 }
 
-Member* Consistent::LocateKey(const std::string& key) const {
+std::shared_ptr<Member> Consistent::LocateKey(const std::string& key) const {
     if (ring_.empty()) {
         return nullptr;
     }
 
     std::shared_lock<std::shared_mutex> lock(mutex_);
     int part_id = GetPartitionID(key);
-    return GetPartitionOwner(part_id);
+    Member* raw_ptr = GetPartitionOwner(part_id);
+
+    if (!raw_ptr) {
+        return nullptr;
+    }
+
+    for (const auto& [name, shared_member] : members_) {
+        if (shared_member.get() == raw_ptr) {
+            return shared_member;
+        }
+    }
+
+    return nullptr;
 }
 
 int Consistent::GetPartitionID(const std::vector<uint8_t>& key) const {
@@ -247,7 +270,7 @@ int Consistent::GetPartitionID(const std::string& key) const {
     return static_cast<int>(hkey % partition_count_);
 }
 
-std::vector<Member*> Consistent::GetClosestN(const std::vector<uint8_t>& key, int count) const {
+std::vector<std::shared_ptr<Member>> Consistent::GetClosestN(const std::vector<uint8_t>& key, int count) const {
     if (count <= 0) {
         return {};
     }
@@ -262,7 +285,7 @@ std::vector<Member*> Consistent::GetClosestN(const std::vector<uint8_t>& key, in
     return GetClosestN(part_id, count);
 }
 
-std::vector<Member*> Consistent::GetClosestN(const std::string& key, int count) const {
+std::vector<std::shared_ptr<Member>> Consistent::GetClosestN(const std::string& key, int count) const {
     if (count <= 0) {
         return {};
     }
@@ -277,7 +300,7 @@ std::vector<Member*> Consistent::GetClosestN(const std::string& key, int count) 
     return GetClosestN(part_id, count);
 }
 
-std::vector<Member*> Consistent::GetClosestN(int part_id, int count) const {
+std::vector<std::shared_ptr<Member>> Consistent::GetClosestN(int part_id, int count) const {
     if (count > static_cast<int>(members_.size())) {
         throw InsufficientMemberCountException("insufficient number of members");
     }
@@ -302,18 +325,23 @@ std::vector<Member*> Consistent::GetClosestN(int part_id, int count) const {
         start_idx = 0;
     }
 
-    std::vector<Member*> result;
+    std::vector<std::shared_ptr<Member>> result;
     result.reserve(count);
     std::unordered_set<std::string> seen;
     int idx = start_idx;
 
     while (static_cast<int>(result.size()) < count && static_cast<int>(seen.size()) < static_cast<int>(members_.size())) {
         uint64_t hash = sorted_set_[idx];
-        Member* member = ring_.at(hash);
-        std::string member_key = member->String();
+        Member* raw_member = ring_.at(hash);
+        std::string member_key = raw_member->String();
 
         if (seen.find(member_key) == seen.end()) {
-            result.push_back(member);
+            for (const auto& [name, shared_member] : members_) {
+                if (shared_member.get() == raw_member) {
+                    result.push_back(shared_member);
+                    break;
+                }
+            }
             seen.insert(member_key);
         }
 
@@ -331,16 +359,21 @@ Member* Consistent::GetPartitionOwner(int part_id) const {
     return (it != partitions_.end()) ? it->second : nullptr;
 }
 
-std::vector<std::unique_ptr<Member>> Consistent::GetMembers() const {
+std::vector<std::shared_ptr<Member>> Consistent::GetMembers() const {
     // First, try to check the cache with a read lock
     {
         std::shared_lock<std::shared_mutex> lock(mutex_);
         if (!members_dirty_ && !cached_members_.empty()) {
-            // Clone from cached raw pointers
-            std::vector<std::unique_ptr<Member>> result;
+            // Return shared_ptrs from cached raw pointers
+            std::vector<std::shared_ptr<Member>> result;
             result.reserve(cached_members_.size());
-            for (Member* member : cached_members_) {
-                result.push_back(member->Clone());
+            for (Member* raw_member : cached_members_) {
+                for (const auto& [name, shared_member] : members_) {
+                    if (shared_member.get() == raw_member) {
+                        result.push_back(shared_member);
+                        break;
+                    }
+                }
             }
             return result;
         }
@@ -351,11 +384,16 @@ std::vector<std::unique_ptr<Member>> Consistent::GetMembers() const {
 
     // Check again if cache was updated
     if (!members_dirty_ && !cached_members_.empty()) {
-        // Clone from cached raw pointers
-        std::vector<std::unique_ptr<Member>> result;
+        // Return shared_ptrs from cached raw pointers
+        std::vector<std::shared_ptr<Member>> result;
         result.reserve(cached_members_.size());
-        for (Member* member : cached_members_) {
-            result.push_back(member->Clone());
+        for (Member* raw_member : cached_members_) {
+            for (const auto& [name, shared_member] : members_) {
+                if (shared_member.get() == raw_member) {
+                    result.push_back(shared_member);
+                    break;
+                }
+            }
         }
         return result;
     }
@@ -368,11 +406,11 @@ std::vector<std::unique_ptr<Member>> Consistent::GetMembers() const {
     }
     members_dirty_ = false;
 
-    // Clone for return value
-    std::vector<std::unique_ptr<Member>> result;
-    result.reserve(cached_members_.size());
-    for (Member* member : cached_members_) {
-        result.push_back(member->Clone());
+    // Return shared_ptrs
+    std::vector<std::shared_ptr<Member>> result;
+    result.reserve(members_.size());
+    for (const auto& [name, shared_member] : members_) {
+        result.push_back(shared_member);
     }
 
     return result;
@@ -517,12 +555,11 @@ Consistent::CalculatePartitionsWithRingAndMemberCount(
     return {partitions, loads};
 }
 
-void Consistent::InitMember(std::unique_ptr<Member> member) {
+void Consistent::InitMember(std::shared_ptr<Member> member) {
     std::string member_name = member->String();
 
-    // Take ownership first, then get stable pointer
-    members_[member_name] = std::move(member);
-    Member* stable_ptr = members_[member_name].get();
+    members_[member_name] = member;
+    Member* stable_ptr = member.get();
 
     for (int i = 0; i < config_.replication_factor; ++i) {
         auto key = BuildVirtualNodeKey(member_name, i);

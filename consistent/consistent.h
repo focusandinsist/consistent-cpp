@@ -49,33 +49,33 @@ private:
     std::vector<uint64_t> sorted_set_;
     uint64_t partition_count_;
     std::unordered_map<std::string, double> loads_;
-    std::unordered_map<std::string, std::unique_ptr<Member>> members_;
+    std::unordered_map<std::string, std::shared_ptr<Member>> members_;
     std::unordered_map<int, Member*> partitions_;
     std::unordered_map<uint64_t, Member*> ring_;
-    
-    std::vector<Member*> cached_members_;
-    bool members_dirty_ = true;
 
-    void InitMember(std::unique_ptr<Member> member);
+    mutable std::vector<Member*> cached_members_;
+    mutable bool members_dirty_ = true;
+
+    void InitMember(std::shared_ptr<Member> member);
     void DistributePartitions();
-    void DistributeWithLoad(int part_id, int idx, 
+    void DistributeWithLoad(int part_id, int idx,
                            std::unordered_map<int, Member*>& partitions,
                            std::unordered_map<std::string, double>& loads);
-    
+
     std::pair<std::unordered_map<int, Member*>, std::unordered_map<std::string, double>>
     CalculatePartitionsWithRingAndMemberCount(
         const std::unordered_map<uint64_t, Member*>& ring,
         const std::vector<uint64_t>& sorted_set,
         int member_count);
-    
+
     // Member management helpers
     std::pair<std::unordered_map<int, Member*>, std::unordered_map<std::string, double>>
     CalculatePartitionsWithNewMember(const std::string& member_name);
-    
+
     std::pair<std::unordered_map<int, Member*>, std::unordered_map<std::string, double>>
     CalculatePartitionsWithoutMember(const std::string& member_name);
-    
-    void AddToRing(Member* member);
+
+    void AddToRing(std::shared_ptr<Member> member);
     void RemoveFromRing(const std::string& name);
     void DelSlice(uint64_t val);
     
@@ -83,7 +83,7 @@ private:
     int GetPartitionID(const std::vector<uint8_t>& key) const;
     int GetPartitionID(const std::string& key) const;
     Member* GetPartitionOwner(int part_id) const;
-    std::vector<Member*> GetClosestN(int part_id, int count) const;
+    std::vector<std::shared_ptr<Member>> GetClosestN(int part_id, int count) const;
     
     double AverageLoad() const;
     std::vector<uint8_t> BuildVirtualNodeKey(const std::string& member_str, int index) const;
@@ -92,20 +92,19 @@ private:
     static void ValidateConfig(int member_count, const Config& config);
 
 public:
-    Consistent(const std::vector<std::unique_ptr<Member>>& members, Config config);
+    Consistent(const std::vector<std::shared_ptr<Member>>& members, Config config);
     
-    void Add(std::unique_ptr<Member> member);
+    void Add(std::shared_ptr<Member> member);
     void Remove(const Member& member);
     void RemoveByName(const std::string& name);
 
-    // Note: Returned pointers are non-owning and managed by this Consistent object.
-    // Do NOT delete these pointers. Do NOT use them after this object is modified or destroyed.
-    Member* LocateKey(const std::vector<uint8_t>& key) const;
-    Member* LocateKey(const std::string& key) const;
-    std::vector<Member*> GetClosestN(const std::vector<uint8_t>& key, int count) const;
-    std::vector<Member*> GetClosestN(const std::string& key, int count) const;
+    // Returns shared_ptr for absolute safety - objects remain valid as long as shared_ptr exists
+    std::shared_ptr<Member> LocateKey(const std::vector<uint8_t>& key) const;
+    std::shared_ptr<Member> LocateKey(const std::string& key) const;
+    std::vector<std::shared_ptr<Member>> GetClosestN(const std::vector<uint8_t>& key, int count) const;
+    std::vector<std::shared_ptr<Member>> GetClosestN(const std::string& key, int count) const;
     
-    std::vector<std::unique_ptr<Member>> GetMembers() const;
+    std::vector<std::shared_ptr<Member>> GetMembers() const;
     std::unordered_map<std::string, double> LoadDistribution() const;
     double GetAverageLoad() const;
 };
